@@ -95,6 +95,10 @@ class AgentActionType(str, Enum):
     network_request = "network_request"
     analysis = "analysis"
     other = "other"
+    browser = "browser"
+    file = "file"
+    notify = "notify"
+    ask = "ask"
 
 class AgentAction(BaseModel):
     id: str
@@ -786,6 +790,41 @@ async def simulate_agent_response(session_id: str, user_content: str):
         test_success = await test_ollama_simple_request()
         if not test_success:
             print("警告: Ollamaテストリクエストが失敗しました。処理を継続しますが注意が必要です。")
+            
+            # テスト失敗の通知アクションを記録
+            notification_action = AgentAction(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                type=AgentActionType.notify,
+                description="Ollamaテスト接続の問題",
+                details={
+                    "message": "Ollamaサーバーとの接続テストに失敗しました。処理を続行しますが、エラーが発生する可能性があります。"
+                },
+                created_at=datetime.now()
+            )
+            agent_actions_db[session_id].append(notification_action)
+            await manager.broadcast(
+                session_id,
+                {"type": "agent_action", "data": json.loads(notification_action.json())}
+            )
+        
+        # タスク解析アクションを記録
+        analysis_action = AgentAction(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            type=AgentActionType.analysis,
+            description="タスク解析開始",
+            details={
+                "task": user_content[:100] + ("..." if len(user_content) > 100 else ""),
+                "model": session.model_id
+            },
+            created_at=datetime.now()
+        )
+        agent_actions_db[session_id].append(analysis_action)
+        await manager.broadcast(
+            session_id,
+            {"type": "agent_action", "data": json.loads(analysis_action.json())}
+        )
         
         # タスクを解析して実行ステップに分解
         print(f"タスク解析開始 - モデル: {session.model_id}, タスク: {user_content[:50]}...")
@@ -794,6 +833,24 @@ async def simulate_agent_response(session_id: str, user_content: str):
         if not result["success"]:
             # タスク解析に失敗した場合
             print(f"タスク解析失敗: {result.get('error', '不明なエラー')}")
+            
+            # エラー通知アクションを記録
+            error_action = AgentAction(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                type=AgentActionType.notify,
+                description="タスク解析失敗",
+                details={
+                    "error": result.get('error', '不明なエラー')
+                },
+                created_at=datetime.now()
+            )
+            agent_actions_db[session_id].append(error_action)
+            await manager.broadcast(
+                session_id,
+                {"type": "agent_action", "data": json.loads(error_action.json())}
+            )
+            
             error_message = Message(
                 id=str(uuid.uuid4()),
                 role="assistant",
@@ -819,6 +876,24 @@ async def simulate_agent_response(session_id: str, user_content: str):
         plan = result["plan"]
         task_title = plan.get("thought", "新しいタスク")[:50]
         steps = plan.get("steps", [])
+        
+        # タスク解析成功のアクションを記録
+        analysis_success_action = AgentAction(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            type=AgentActionType.analysis,
+            description="タスク解析完了",
+            details={
+                "thought": task_title,
+                "steps_count": len(steps)
+            },
+            created_at=datetime.now()
+        )
+        agent_actions_db[session_id].append(analysis_success_action)
+        await manager.broadcast(
+            session_id,
+            {"type": "agent_action", "data": json.loads(analysis_success_action.json())}
+        )
         
         # タスクを作成
         now = datetime.now()
@@ -939,17 +1014,24 @@ async def simulate_agent_response(session_id: str, user_content: str):
                 {"type": "message", "data": json.loads(running_message.json())}
             )
             
+            # アクションタイプをMapする関数
+            def map_action_type(action_str):
+                action_map = {
+                    "shell_command": AgentActionType.command,
+                    "read_file": AgentActionType.file,
+                    "write_file": AgentActionType.file,
+                    "web_fetch": AgentActionType.browser
+                }
+                return action_map.get(action_str, AgentActionType.other)
+            
             # アクションを記録
+            action_type = map_action_type(step_data.get("action", ""))
             action = AgentAction(
                 id=str(uuid.uuid4()),
                 session_id=session_id,
-                type=AgentActionType.other,  # 適切なタイプに変更
+                type=action_type,
                 description=f"ステップ {i+1} 実行開始: {step_obj.title}",
-                details={
-                    "step_id": step_obj.id,
-                    "action": step_data.get("action", ""),
-                    "params": step_data.get("params", {})
-                },
+                details=step_data.get("params", {}),
                 created_at=datetime.now()
             )
             agent_actions_db[session_id].append(action)
@@ -972,6 +1054,25 @@ async def simulate_agent_response(session_id: str, user_content: str):
                 # 成功の場合はステップの状態を「完了」に更新
                 step_obj.status = TaskStepStatus.completed
                 step_obj.updated_at = datetime.now()
+                
+                # 成功のアクションを記録
+                success_action = AgentAction(
+                    id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    type=action_type,
+                    description=f"ステップ {i+1} 完了: {step_obj.title}",
+                    details={
+                        "success": True,
+                        "step_id": step_obj.id,
+                        "result": "success"
+                    },
+                    created_at=datetime.now()
+                )
+                agent_actions_db[session_id].append(success_action)
+                await manager.broadcast(
+                    session_id,
+                    {"type": "agent_action", "data": json.loads(success_action.json())}
+                )
                 
                 # 成功メッセージをユーザーに通知
                 success_message = Message(
@@ -1005,6 +1106,25 @@ async def simulate_agent_response(session_id: str, user_content: str):
                 # 失敗の場合はステップの状態を「失敗」に更新
                 step_obj.status = TaskStepStatus.failed
                 step_obj.updated_at = datetime.now()
+                
+                # 失敗のアクションを記録
+                error_action = AgentAction(
+                    id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    type=action_type,
+                    description=f"ステップ {i+1} 失敗: {step_obj.title}",
+                    details={
+                        "success": False,
+                        "step_id": step_obj.id,
+                        "error": step_result.get("error", "不明なエラー")
+                    },
+                    created_at=datetime.now()
+                )
+                agent_actions_db[session_id].append(error_action)
+                await manager.broadcast(
+                    session_id,
+                    {"type": "agent_action", "data": json.loads(error_action.json())}
+                )
                 
                 # エラーメッセージをユーザーに通知
                 error_message = Message(
@@ -1069,6 +1189,26 @@ async def simulate_agent_response(session_id: str, user_content: str):
             {"type": "task", "data": json.loads(task.json())}
         )
         
+        # 完了アクションを記録
+        complete_action = AgentAction(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            type=AgentActionType.notify,
+            description="タスク完了",
+            details={
+                "task_id": task.id,
+                "task_title": task_title,
+                "total_steps": len(steps),
+                "success": True
+            },
+            created_at=datetime.now()
+        )
+        agent_actions_db[session_id].append(complete_action)
+        await manager.broadcast(
+            session_id,
+            {"type": "agent_action", "data": json.loads(complete_action.json())}
+        )
+        
         # タスク完了の要約を生成
         summary = await generate_task_summary(session.model_id, user_content, steps_results)
         
@@ -1095,6 +1235,25 @@ async def simulate_agent_response(session_id: str, user_content: str):
         
     except Exception as e:
         print(f"エージェント応答の生成中にエラーが発生しました: {str(e)}\n{traceback.format_exc()}")
+        
+        # エラーアクションを記録
+        error_action = AgentAction(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            type=AgentActionType.notify,
+            description="エラー発生",
+            details={
+                "error": str(e),
+                "traceback": traceback.format_exc()[:500]
+            },
+            created_at=datetime.now()
+        )
+        agent_actions_db[session_id].append(error_action)
+        await manager.broadcast(
+            session_id,
+            {"type": "agent_action", "data": json.loads(error_action.json())}
+        )
+        
         # エラーメッセージを送信
         error_message = Message(
             id=str(uuid.uuid4()),
