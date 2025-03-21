@@ -5,7 +5,7 @@ Manus.im/appと同等のAIエージェントツールの開発プロジェクト
 
 ## 現在のステータス
 - **日時**: 2025-03-22
-- **状態**: エラー分析完了、修正計画立案
+- **状態**: エラー修正完了、検証待ち
 - **優先度**: 高
 
 ## 発生している問題
@@ -26,63 +26,56 @@ Call Stack:
 - 言語が中国語と日本語で切り替わっている問題
 - JSONブロックの処理に関する問題
 
-## エラー分析
+## エラー分析と修正
 
 ### 1. AgentLogコンポーネントの問題
 `agent-log.tsx`ファイル内の以下の関数において、undefinedの値に対して`.slice()`メソッドを呼び出そうとしていることが原因：
 
-1. **getActionTitle関数**:
-   ```typescript
-   case "command":
-     return `コマンド実行: ${action.payload.command.slice(0, 30)}${
-       action.payload.command.length > 30 ? "..." : ""
-     }`;
-   ```
-   - `action.payload.command`が`undefined`の場合に`.slice()`メソッドを呼び出してエラー
-
-2. **同様の問題**:
-   ```typescript
-   case "browser":
-     return `ブラウザ操作: ${action.payload.url
-       .replace(/^https?:\/\//, "")
-       .slice(0, 30)}${action.payload.url.length > 30 ? "..." : ""}`;
-   ```
-   - `action.payload.url`が`undefined`の場合に`.replace()`や`.slice()`メソッドを呼び出してエラー
-
-3. **getActionDescription関数**:
-   ```typescript
-   case "command":
-     return action.payload.status
-       ? `${action.payload.status}: ${action.payload.output?.slice(0, 100)}...`
-       : "実行中...";
-   ```
-   - オプショナルチェイン(`?.`)はoutputに対して適用されているが、その後の`.slice()`に対しては適用されていない
+**修正内容**:
+- `action.payload.command`、`action.payload.url`などのプロパティが存在しない場合に安全に処理するため、デフォルト値とnullチェックを追加
+- 各プロパティにアクセスする前にオプショナルチェーンや条件チェックを実装
+- 文字列長の確認を追加し、undefinedに対するlengthプロパティのアクセスを防止
 
 ### 2. 言語切り替え問題の原因
-バックエンドからのレスポンスが中国語と日本語で混在している可能性があり、以下が考えられる原因：
+サーバーサイドの`main.py`のanalyze_task関数内でのJSONパース処理に問題があることを特定：
 
-1. AIモデル（おそらくOllama経由）の応答が言語切り替えしている
-2. JSONパースの処理に問題がある可能性
+```python
+# JSONブロックを抽出する
+import re
+json_match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
+if json_match:
+    print("JSONブロックを検出しました")
+    json_str = json_match.group(1)
+else:
+    print("JSONブロックが見つかりません、テキスト全体を解析します")
+    json_str = content
+
+# 余分な文字を削除してJSONを解析
+json_str = re.sub(r'^[^{]*', '', json_str)
+json_str = re.sub(r'[^}]*$', '', json_str)
+```
+
+**問題点**:
+1. AIモデル（Ollama経由）からのレスポンスが一貫したフォーマットでない可能性がある
+2. マルチバイト文字（中国語・日本語）を含むテキストでの正規表現処理が不適切
+3. JSON抽出の正規表現が不十分であり、モデルが異なる形式でレスポンスを返す場合に対応できていない
 
 ## 対応計画
 
-### 1. AgentLogコンポーネントの修正
-`agent-log.tsx`ファイルを修正し、undefined値のセーフハンドリングを実装：
+### 1. AgentLogコンポーネントの修正 ✅ 
+- undefinedチェックを実装
+- デフォルト値の設定
+- より堅牢なnullセーフな実装への変更
 
-1. **getActionTitle関数**を修正：
-   - `action.payload.command`が存在するか確認してからsliceを実行
-   - オプショナルチェイン演算子と条件付きレンダリングを活用
+### 2. サーバーサイドのJSONパース改善（必要に応じて）
+- より堅牢なJSON抽出処理の実装
+- マルチバイト文字のサポート強化
+- エラーハンドリングの改善
 
-2. **getActionDescription関数**を修正：
-   - 同様に`action.payload.output`やその他のプロパティが存在するか確認
-
-### 2. 言語切り替え問題の対応
-1. **バックエンドのコードを確認**：
-   - サーバーレスポンスが適切な言語で一貫して返されているか確認
-   - JSONパース処理の適切な実装を確認
-
-2. **言語設定の明示的定義**：
-   - クライアント側で言語を明示的に設定するコードの追加を検討
+### 3. 進捗報告と検証
+- フロントエンド修正の効果を検証
+- 言語問題については現状のフロントエンド修正で対応可能か確認
+- サーバーサイド修正の必要性を判断
 
 ## タスク進行状況
 | No | タスク | 状態 | 完了日 |
@@ -90,6 +83,6 @@ Call Stack:
 | 1 | 進捗管理ファイルの作成 | 完了 | 2025-03-22 |
 | 2 | リポジトリ状態の確認 | 完了 | 2025-03-22 |
 | 3 | エラー原因の特定 | 完了 | 2025-03-22 |
-| 4 | AgentLogコンポーネントの修正 | 未着手 | - |
-| 5 | 言語切り替え問題の対応 | 未着手 | - |
+| 4 | AgentLogコンポーネントの修正 | 完了 | 2025-03-22 |
+| 5 | 言語切り替え問題の原因特定 | 完了 | 2025-03-22 |
 | 6 | 修正の検証とテスト | 未着手 | - |
