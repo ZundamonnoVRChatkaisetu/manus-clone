@@ -57,16 +57,27 @@ export function AgentLog({ actions }: AgentLogProps) {
 
 function getActionTitle(action: AgentAction): string {
   switch (action.type) {
-    case "command":
-      return `コマンド実行: ${action.payload.command.slice(0, 30)}${
-        action.payload.command.length > 30 ? "..." : ""
+    case "command": {
+      // commandが存在するか確認してからslice
+      const command = action.payload?.command || "";
+      return `コマンド実行: ${command.slice(0, 30)}${
+        command.length > 30 ? "..." : ""
       }`;
-    case "browser":
-      return `ブラウザ操作: ${action.payload.url
-        .replace(/^https?:\/\//, "")
-        .slice(0, 30)}${action.payload.url.length > 30 ? "..." : ""}`;
-    case "file":
-      return `ファイル操作: ${action.payload.operation} ${action.payload.path.split("/").pop()}`;
+    }
+    case "browser": {
+      // urlが存在するか確認してからreplace/slice
+      const url = action.payload?.url || "";
+      const trimmedUrl = url.replace(/^https?:\/\//, "");
+      return `ブラウザ操作: ${trimmedUrl.slice(0, 30)}${
+        trimmedUrl.length > 30 ? "..." : ""
+      }`;
+    }
+    case "file": {
+      const operation = action.payload?.operation || "操作";
+      const path = action.payload?.path || "";
+      const fileName = path.split("/").pop() || path;
+      return `ファイル操作: ${operation} ${fileName}`;
+    }
     case "notify":
       return "通知";
     case "ask":
@@ -78,19 +89,30 @@ function getActionTitle(action: AgentAction): string {
 
 function getActionDescription(action: AgentAction): string {
   switch (action.type) {
-    case "command":
-      return action.payload.status
-        ? `${action.payload.status}: ${action.payload.output?.slice(0, 100)}...`
-        : "実行中...";
-    case "browser":
-      return action.payload.operation || action.payload.description || "ブラウザでの操作";
-    case "file":
-      return `${action.payload.path}`;
-    case "notify":
-      return action.payload.message;
-    case "ask":
-      return action.payload.question;
-    default:
-      return JSON.stringify(action.payload).slice(0, 100);
+    case "command": {
+      const status = action.payload?.status;
+      if (!status) return "実行中...";
+      
+      const output = action.payload?.output || "";
+      return `${status}: ${output.slice(0, 100)}${output.length > 100 ? "..." : ""}`;
+    }
+    case "browser": {
+      return action.payload?.operation || 
+             action.payload?.description || 
+             "ブラウザでの操作";
+    }
+    case "file": {
+      return action.payload?.path || "ファイル操作";
+    }
+    case "notify": {
+      return action.payload?.message || "通知メッセージ";
+    }
+    case "ask": {
+      return action.payload?.question || "質問内容";
+    }
+    default: {
+      const payloadStr = action.payload ? JSON.stringify(action.payload) : "{}";
+      return payloadStr.slice(0, 100) + (payloadStr.length > 100 ? "..." : "");
+    }
   }
 }
