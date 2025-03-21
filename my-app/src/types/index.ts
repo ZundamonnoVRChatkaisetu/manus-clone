@@ -60,7 +60,10 @@ export interface TaskStep {
  * AIエージェントのアクションの型定義
  */
 export interface AgentAction {
-  type: "command" | "browser" | "file" | "notify" | "ask";
+  id?: string;
+  type: "command" | "browser" | "file" | "notify" | "ask" | "file_operation" | "network_request" | "analysis" | "other";
+  description?: string;
+  details?: any;
   payload: any;
   timestamp: Date;
 }
@@ -70,6 +73,7 @@ export interface AgentAction {
  */
 export type AgentState = 
   | "idle" 
+  | "thinking"
   | "planning" 
   | "executing" 
   | "waiting_for_user" 
