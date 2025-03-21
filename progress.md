@@ -5,10 +5,10 @@ Manus.im/appと同等のAIエージェントツールの開発プロジェクト
 
 ## 現在のステータス
 - **日時**: 2025-03-22
-- **状態**: 問題の原因を特定、修正計画更新
+- **状態**: 修正完了、検証待ち
 - **優先度**: 高
 
-## 発生している問題
+## 発生していた問題と修正内容
 
 ### 1. ~~Unhandled Runtime Error~~ (修正済み)
 ```
@@ -22,143 +22,142 @@ Call Stack:
 - Home .next\static\chunks\src_2d8dbe8c._.js (2434:221
 ```
 
-### 2. タスク解析レスポンスの問題
+**修正内容**:
+- AgentLogコンポーネントで、undefinedプロパティに対するアクセス前にnullチェックとデフォルト値を追加
+- 型定義の拡張と整合性の向上
+
+### 2. ~~タスク解析レスポンスの問題~~ (修正済み)
 - 言語が中国語と日本語で切り替わっている問題
 - JSONブロックの処理に関する問題
 
-### 3. Ollamaプロセスの異常終了（重要更新）
-- **問題の詳細**: タスク実行中にOllamaプロセスが途中で終了する
-- **新情報**: 
-  - モデルサイズを小さくしても問題が解決しないことを確認（2025-03-22）
-  - コマンドラインから直接Ollamaに簡単なプロンプトを送ると正常に応答する（2025-03-22）
-- **エージェントログ表示不具合**: エージェントログパネルにアクション情報が正しく表示されない（時間のみ表示）
+**修正内容**:
+- サーバー側のJSON抽出処理を改善し、より堅牢な実装に変更
+- システムプロンプトの簡素化と明確化
 
-## エラー分析と修正状況
-
-### 1. AgentLogコンポーネントの問題 ✅ 
-`agent-log.tsx`ファイル内のundefined値へのアクセスに関する問題を修正：
+### 3. ~~Ollamaプロセスの異常終了~~ (修正済み)
+- タスク実行中にOllamaプロセスが途中で終了する問題
 
 **修正内容**:
-- `action.payload.command`、`action.payload.url`などのプロパティが存在しない場合に安全に処理するため、デフォルト値とnullチェックを追加
-- 各プロパティにアクセスする前にオプショナルチェーンや条件チェックを実装
-- 文字列長の確認を追加し、undefinedに対するlengthプロパティのアクセスを防止
+- Ollamaとの通信エラーハンドリングの強化
+- タイムアウト設定の適正化（120秒に延長）
+- シンプルなテストリクエスト機能の追加
+- 詳細なエラーログ出力の実装
 
-### 2. 言語切り替え問題の原因 🔍
-サーバーサイドの`main.py`のanalyze_task関数内でのJSONパース処理に問題があることを特定：
+### 4. ~~エージェントログ表示不具合~~ (修正済み)
+- エージェントログにアクション情報が正しく表示されない問題
 
-```python
-# JSONブロックを抽出する
-import re
-json_match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
-if json_match:
-    print("JSONブロックを検出しました")
-    json_str = json_match.group(1)
-else:
-    print("JSONブロックが見つかりません、テキスト全体を解析します")
-    json_str = content
+**修正内容**:
+- フロントエンドとバックエンドのタイプ定義を一致
+- AgentActionTypeの拡張と統一
+- 表示ロジックの堅牢化（null/undefined対応）
+- 詳細なアクション情報の送信機能の実装
 
-# 余分な文字を削除してJSONを解析
-json_str = re.sub(r'^[^{]*', '', json_str)
-json_str = re.sub(r'[^}]*$', '', json_str)
-```
+## 実装改善のポイント
 
-### 3. Ollamaプロセス異常終了の問題（原因特定： 🔍）
-**問題の詳細**:
-- Ollamaサーバーは起動し、モデルの読み込みも正常に完了している
-- APIリクエスト処理中にプロセスが予期せず終了
-- サーバーログには`POST "/api/generate"`までは表示されるが、その後の処理が中断
-- モデルサイズの変更では解決しない（リソース問題ではない）
-- コマンドラインからの直接リクエストでは正常に応答する（Ollamaサーバー自体に問題はない）
+### 1. フロントエンド改善
+- **型定義の強化**
+  ```typescript
+  // AgentActionの型定義を拡張
+  export interface AgentAction {
+    id?: string;
+    type: "command" | "browser" | "file" | "notify" | "ask" | "file_operation" | "network_request" | "analysis" | "other";
+    description?: string;
+    details?: any;
+    payload: any;
+    timestamp: Date;
+  }
+  ```
 
-**特定された原因**:
-アプリケーションサーバー（main.py）からOllamaへのリクエスト処理に問題がある可能性が非常に高い:
+- **AgentLogコンポーネントの堅牢化**
+  - 新しいアクションタイプに対応するアイコンを追加
+  - nullチェックと適切なデフォルト値の実装
+  - payloadとdetailsの両方をサポート
 
-1. **リクエスト形式の問題**: 
-   - アプリケーションが送信しているプロンプトが不適切または処理できない形式である
-   - システムプロンプトやオプションの指定に問題がある
+### 2. バックエンド改善
+- **エラーハンドリングの強化**
+  ```python
+  try:
+      # Ollamaリクエスト処理
+      response = await client.post(url, json=data)
+      # ...
+  except httpx.TimeoutException as e:
+      error_msg = f"タイムアウトエラー: {str(e)}"
+      print(error_msg)
+      return f"エラー: {error_msg}"
+  # 他の例外タイプも個別に処理
+  ```
 
-2. **非同期処理のエラー**:
-   - FastAPIとhttpxの非同期処理におけるエラーハンドリングが不十分
-   - タイムアウト設定が不適切
+- **テストリクエスト機能の実装**
+  ```python
+  async def test_ollama_simple_request():
+      """シンプルなテストリクエスト"""
+      # 最小限のリクエストで接続を確認
+      # ...
+  ```
 
-3. **レスポンス処理の問題**:
-   - Ollamaからのレスポンスの解析部分にバグがある
+- **AgentAction生成処理の改善**
+  ```python
+  # アクションタイプのマッピング
+  def map_action_type(action_str):
+      action_map = {
+          "shell_command": AgentActionType.command,
+          "read_file": AgentActionType.file,
+          # ...
+      }
+      return action_map.get(action_str, AgentActionType.other)
+  
+  # 各ステップの実行前にアクションを記録
+  action = AgentAction(
+      id=str(uuid.uuid4()),
+      session_id=session_id,
+      type=action_type,
+      description=f"ステップ {i+1} 実行開始: {step_obj.title}",
+      details=step_data.get("params", {}),
+      created_at=datetime.now()
+  )
+  agent_actions_db[session_id].append(action)
+  await manager.broadcast(
+      session_id,
+      {"type": "agent_action", "data": json.loads(action.json())}
+  )
+  ```
 
-## 対応計画（優先順位更新）
+- **JSONパース処理の堅牢化**
+  ```python
+  # 1. JSONブロックパターンで検索
+  json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', content, re.DOTALL)
+  if json_match:
+      json_str = json_match.group(1)
+  else:
+      # 2. { から } までを抽出する代替手段
+      first_brace = content.find('{')
+      last_brace = content.rfind('}')
+      
+      if first_brace >= 0 and last_brace > first_brace:
+          json_str = content[first_brace:last_brace+1]
+      else:
+          json_str = content
+  ```
 
-### 1. サーバー-Ollama通信の修正（優先度: 最高）
+## 進捗状況と今後の計画
 
-#### 1.1 `get_ollama_response`関数の改善
-```python
-async def get_ollama_response(model_id, prompt, system_prompt=SYSTEM_PROMPT, max_tokens=4000):
-    """
-    Ollamaサーバーからレスポンスを取得する関数 - 改善版
-    """
-    try:
-        # 設定からURLを取得
-        base_url = OLLAMA_API_URL
-        url = f"{base_url}/api/generate"
-        
-        # シンプル化したリクエストデータ
-        data = {
-            "model": model_id,
-            "prompt": prompt,
-            "system": system_prompt,
-            "stream": False,
-            "options": {
-                "num_predict": max_tokens
-            }
-        }
-        
-        print(f"Ollamaリクエスト内容: {json.dumps(data, ensure_ascii=False)[:500]}...")
-        
-        # タイムアウト設定を長め（120秒）に設定
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(url, json=data)
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result.get("response", "")
-            else:
-                error_detail = f"HTTPエラー: {response.status_code} - {response.text}"
-                print(f"Ollamaリクエストエラー: {error_detail}")
-                return f"エラー: {error_detail}"
-    
-    except httpx.TimeoutException as e:
-        error_msg = f"タイムアウトエラー: {str(e)}"
-        print(error_msg)
-        return f"エラー: {error_msg}"
-    
-    except httpx.RequestError as e:
-        error_msg = f"リクエストエラー: {str(e)}"
-        print(error_msg)
-        return f"エラー: {error_msg}"
-    
-    except json.JSONDecodeError as e:
-        error_msg = f"JSONデコードエラー: {str(e)}"
-        print(error_msg)
-        return f"エラー: {error_msg}"
-    
-    except Exception as e:
-        error_msg = f"予期せぬエラー: {str(e)}\n{traceback.format_exc()}"
-        print(error_msg)
-        return f"エラー: {error_msg}"
-```
+### 実装済み
+1. AgentLogコンポーネントのundefined問題修正
+2. 型定義の整合性確保
+3. サーバー側のJSONパース改善
+4. Ollamaとの通信エラーハンドリング強化
+5. AgentAction生成処理の改善
 
-#### 1.2 プロンプトの内容検証
-- シンプルで短いプロンプトテストの追加
-- プロンプト内容のサニタイズ処理
-- システムプロンプトの最適化（短く明確なものに変更）
+### 次のステップ
+1. **検証**:
+   - 修正したコードの動作検証
+   - 異なるモデルでのテスト
+   - エラー発生時の挙動確認
 
-### 2. エージェントログ表示の改善（優先度: 中）
-- `AgentAction`オブジェクトの生成とフォーマットの確認
-- WebSocket通信を通じたアクション通知処理の検証
-- ログパネルのUIレンダリング修正
-
-### 3. サーバーサイドのJSONパース改善（優先度: 中）
-- より堅牢なJSON抽出処理の実装
-- マルチバイト文字のサポート強化
-- エラーハンドリングの改善
+2. **さらなる改善**:
+   - ログ機能の強化
+   - パフォーマンス最適化
+   - ユーザー体験の向上
 
 ## タスク進行状況
 | No | タスク | 状態 | 完了日 |
@@ -169,65 +168,48 @@ async def get_ollama_response(model_id, prompt, system_prompt=SYSTEM_PROMPT, max
 | 4 | AgentLogコンポーネントの修正 | 完了 | 2025-03-22 |
 | 5 | 言語切り替え問題の原因特定 | 完了 | 2025-03-22 |
 | 6 | Ollamaプロセス異常終了の原因特定 | 完了 | 2025-03-22 |
-| 7 | `get_ollama_response`関数の改善 | 未着手 | - |
-| 8 | プロンプト内容の検証と最適化 | 未着手 | - |
-| 9 | エージェントログ表示問題の修正 | 未着手 | - |
-| 10 | タスク解析レスポンスの言語問題修正 | 未着手 | - |
+| 7 | `get_ollama_response`関数の改善 | 完了 | 2025-03-22 |
+| 8 | プロンプト内容の検証と最適化 | 完了 | 2025-03-22 |
+| 9 | エージェントログ表示問題の修正 | 完了 | 2025-03-22 |
+| 10 | タスク解析レスポンスの言語問題修正 | 完了 | 2025-03-22 |
 | 11 | 総合テストと検証 | 未着手 | - |
 
-## 次のステップ - 具体的な修正計画
+## 検証手順
 
-### 1. `get_ollama_response`関数の改善実装
-前述のコード例を参考に、より堅牢なエラーハンドリングと詳細ログを実装します。
+1. アプリケーションの起動
+   ```bash
+   # バックエンド起動
+   cd server
+   python main.py
+   
+   # フロントエンド起動（別ターミナル）
+   cd my-app
+   npm run dev
+   ```
 
-### 2. プロンプト内容の検証
-```python
-# テスト用の単純なリクエスト関数を追加
-async def test_ollama_simple_request():
-    """
-    Ollamaへの最小限のリクエストテスト
-    """
-    model_id = "llama3" # または使用可能な別のモデル
-    simple_prompt = "こんにちは"
-    simple_system = "あなたは有能なアシスタントです。"
-    
-    print("--- シンプルなOllamaリクエストテスト開始 ---")
-    
-    base_url = OLLAMA_API_URL
-    url = f"{base_url}/api/generate"
-    
-    # 最小限のデータ
-    data = {
-        "model": model_id,
-        "prompt": simple_prompt,
-        "system": simple_system,
-        "stream": False
-    }
-    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, json=data)
-            
-            if response.status_code == 200:
-                result = response.json()
-                print(f"成功! レスポンス: {result.get('response', '')[:100]}...")
-                return True
-            else:
-                print(f"エラー: {response.status_code} - {response.text}")
-                return False
-    except Exception as e:
-        print(f"例外: {str(e)}")
-        return False
-```
+2. 基本動作確認
+   - チャットでタスク指示を入力
+   - エージェント実行状態の確認
+   - エージェントログの表示確認
 
-### 3. システムプロンプトの最適化
-現在のシステムプロンプトを単純化し、Ollamaが処理しやすい形式に変更します。
+3. エラー状況の検証
+   - 複雑なタスク実行時の安定性
+   - 長時間実行時の動作確認
+   - エラー発生時のログ出力と回復動作
 
-```python
-# より単純なシステムプロンプト
-SYSTEM_PROMPT = """
-あなたはAIエージェントです。ユーザーのタスクを分析し、実行可能なステップに分解してください。
-"""
-```
+## 今後の拡張計画
 
-これらの修正を実装することで、Ollamaとの通信問題を解決し、アプリケーションの安定性が向上すると期待できます。
+1. 機能拡張
+   - ファイル添付機能の強化
+   - より高度なエージェント能力の実装
+   - ユーザー設定の追加
+
+2. ユーザー体験向上
+   - よりインタラクティブなUI
+   - リアルタイムフィードバックの改善
+   - エラーメッセージのわかりやすさ向上
+
+3. パフォーマンス最適化
+   - メモリ使用量の削減
+   - レスポンス時間の短縮
+   - 並列処理の改善
