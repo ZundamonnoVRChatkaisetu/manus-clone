@@ -486,6 +486,66 @@ class AgentTools:
                 "error": str(e)
             }
 
+# ステップ実行の結果を分析し次のアクションを決定する
+async def analyze_step_result(model_id, step, result):
+    """
+    ステップ実行結果を分析し、次のアクションを決定する
+    """
+    print(f"ステップ実行結果の分析 - ステップ: {step.get('title', '不明なステップ')}")
+    
+    # 成功した場合は単に成功を報告
+    if result.get("success", False):
+        return {
+            "success": True,
+            "continue": True,
+            "message": f"ステップ「{step.get('title', '不明なステップ')}」は正常に完了しました。"
+        }
+    
+    # 失敗した場合は、エラーの詳細を含めて報告
+    error_msg = result.get("error", "不明なエラー")
+    return {
+        "success": False,
+        "continue": False,  # エラーが発生したため処理を停止
+        "message": f"ステップ「{step.get('title', '不明なステップ')}」の実行中にエラーが発生しました: {error_msg}"
+    }
+
+# タスク完了後の要約を生成
+async def generate_task_summary(model_id, task_description, steps_results):
+    """
+    タスク完了後の要約を生成する
+    """
+    print(f"タスク要約生成開始 - モデル: {model_id}")
+    
+    # 各ステップの実行結果を整形
+    steps_summary = ""
+    for i, (step, result) in enumerate(steps_results):
+        status = "成功" if result.get("success", False) else "失敗"
+        steps_summary += f"ステップ {i+1}: {step.get('title', '不明なステップ')} - {status}\n"
+        if "stdout" in result:
+            output = result.get("stdout", "").strip()
+            if output:
+                steps_summary += f"出力: {output[:500]}{'...' if len(output) > 500 else ''}\n"
+        if "error" in result and result["error"]:
+            steps_summary += f"エラー: {result.get('error', '')}\n"
+        steps_summary += "\n"
+    
+    prompt = f"""
+以下のタスクとその実行結果を要約してください：
+
+タスク: {task_description}
+
+実行結果:
+{steps_summary}
+
+要約とユーザーへのフィードバックを簡潔に記述してください。
+"""
+    
+    response = await get_ollama_response(model_id, prompt)
+    if not response.startswith("エラー: ") and not response.startswith("例外発生: "):
+        return response
+    else:
+        return "タスク実行は完了しましたが、要約の生成中にエラーが発生しました。詳細はログを確認してください。"
+
 # WebSocket接続を管理するクラス
 class ConnectionManager:
     def __init__(self):
@@ -724,6 +784,220 @@ async def simulate_agent_response(session_id: str, user_content: str):
                 {"type": "task_step", "data": json.loads(step.json())}
             )
             await asyncio.sleep(0.5)
+            
+        # ここから実際のタスク実行ループを開始
+        # エージェントの状態を「実行中」に変更
+        agent_state_db[session_id] = AgentState.executing
+        await manager.broadcast(
+            session_id,
+            {"type": "agent_state", "data": AgentState.executing}
+        )
+        
+        # ステップごとの実行結果を保存するリスト
+        steps_results = []
+        
+        # タスクのステップを順番に実行
+        for i, (step_obj, step_data) in enumerate(zip(task_steps_db[task.id], steps)):
+            # 中断確認
+            if agent_state_db[session_id] == AgentState.waiting_for_user:
+                # ユーザーによる停止
+                pause_message = Message(
+                    id=str(uuid.uuid4()),
+                    role="assistant",
+                    content=f"タスクの実行が一時停止されました。再開するには「再開」ボタンをクリックしてください。",
+                    timestamp=datetime.now(),
+                    files=None
+                )
+                messages_db[session_id].append(pause_message)
+                await manager.broadcast(
+                    session_id,
+                    {"type": "message", "data": json.loads(pause_message.json())}
+                )
+                return
+            elif agent_state_db[session_id] == AgentState.idle:
+                # ユーザーによる停止
+                stop_message = Message(
+                    id=str(uuid.uuid4()),
+                    role="assistant",
+                    content=f"タスクの実行が停止されました。",
+                    timestamp=datetime.now(),
+                    files=None
+                )
+                messages_db[session_id].append(stop_message)
+                await manager.broadcast(
+                    session_id,
+                    {"type": "message", "data": json.loads(stop_message.json())}
+                )
+                return
+            
+            # ステップの状態を「実行中」に更新
+            step_obj.status = TaskStepStatus.in_progress
+            step_obj.updated_at = datetime.now()
+            await manager.broadcast(
+                session_id,
+                {"type": "task_step", "data": json.loads(step_obj.json())}
+            )
+            
+            # ステップの実行開始をユーザーに通知
+            running_message = Message(
+                id=str(uuid.uuid4()),
+                role="assistant",
+                content=f"ステップ {i+1} を実行中: {step_obj.title}",
+                timestamp=datetime.now(),
+                files=None
+            )
+            messages_db[session_id].append(running_message)
+            await manager.broadcast(
+                session_id,
+                {"type": "message", "data": json.loads(running_message.json())}
+            )
+            
+            # アクションを記録
+            action = AgentAction(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                type=AgentActionType.other,  # 適切なタイプに変更
+                description=f"ステップ {i+1} 実行開始: {step_obj.title}",
+                details={
+                    "step_id": step_obj.id,
+                    "action": step_data.get("action", ""),
+                    "params": step_data.get("params", {})
+                },
+                created_at=datetime.now()
+            )
+            agent_actions_db[session_id].append(action)
+            await manager.broadcast(
+                session_id,
+                {"type": "agent_action", "data": json.loads(action.json())}
+            )
+            
+            # ステップを実行
+            print(f"ステップ {i+1} 実行: {step_obj.title}")
+            step_result = await execute_step(step_data, session_id)
+            
+            # 実行結果を保存
+            steps_results.append((step_data, step_result))
+            
+            # ステップの実行結果を分析
+            analysis = await analyze_step_result(session.model_id, step_data, step_result)
+            
+            if step_result["success"]:
+                # 成功の場合はステップの状態を「完了」に更新
+                step_obj.status = TaskStepStatus.completed
+                step_obj.updated_at = datetime.now()
+                
+                # 成功メッセージをユーザーに通知
+                success_message = Message(
+                    id=str(uuid.uuid4()),
+                    role="assistant",
+                    content=f"ステップ {i+1} が正常に完了しました: {step_obj.title}",
+                    timestamp=datetime.now(),
+                    files=None
+                )
+                messages_db[session_id].append(success_message)
+                await manager.broadcast(
+                    session_id,
+                    {"type": "message", "data": json.loads(success_message.json())}
+                )
+                
+                # 実行結果の詳細をユーザーに通知（シェルコマンドの場合は出力を表示）
+                if "stdout" in step_result and step_result["stdout"].strip():
+                    output_message = Message(
+                        id=str(uuid.uuid4()),
+                        role="assistant",
+                        content=f"出力結果:\n```\n{step_result['stdout']}\n```",
+                        timestamp=datetime.now(),
+                        files=None
+                    )
+                    messages_db[session_id].append(output_message)
+                    await manager.broadcast(
+                        session_id,
+                        {"type": "message", "data": json.loads(output_message.json())}
+                    )
+            else:
+                # 失敗の場合はステップの状態を「失敗」に更新
+                step_obj.status = TaskStepStatus.failed
+                step_obj.updated_at = datetime.now()
+                
+                # エラーメッセージをユーザーに通知
+                error_message = Message(
+                    id=str(uuid.uuid4()),
+                    role="assistant",
+                    content=f"ステップ {i+1} の実行中にエラーが発生しました: {step_result.get('error', '不明なエラー')}",
+                    timestamp=datetime.now(),
+                    files=None
+                )
+                messages_db[session_id].append(error_message)
+                await manager.broadcast(
+                    session_id,
+                    {"type": "message", "data": json.loads(error_message.json())}
+                )
+                
+                # ステップのエラーでタスク全体を中断する場合
+                if not analysis.get("continue", False):
+                    # タスクの状態を「失敗」に更新
+                    task.status = TaskStatus.failed
+                    task.updated_at = datetime.now()
+                    await manager.broadcast(
+                        session_id,
+                        {"type": "task", "data": json.loads(task.json())}
+                    )
+                    
+                    # 停止メッセージをユーザーに通知
+                    abort_message = Message(
+                        id=str(uuid.uuid4()),
+                        role="assistant",
+                        content=f"エラーが発生したため、タスクの実行を中止します。",
+                        timestamp=datetime.now(),
+                        files=None
+                    )
+                    messages_db[session_id].append(abort_message)
+                    await manager.broadcast(
+                        session_id,
+                        {"type": "message", "data": json.loads(abort_message.json())}
+                    )
+                    
+                    # エージェントの状態を「アイドル」に更新
+                    agent_state_db[session_id] = AgentState.idle
+                    await manager.broadcast(
+                        session_id,
+                        {"type": "agent_state", "data": AgentState.idle}
+                    )
+                    return
+            
+            # ステップの状態を更新
+            await manager.broadcast(
+                session_id,
+                {"type": "task_step", "data": json.loads(step_obj.json())}
+            )
+            
+            # 次のステップに進む前に少し待機
+            await asyncio.sleep(1)
+        
+        # すべてのステップが完了した場合、タスクの完了処理
+        task.status = TaskStatus.completed
+        task.updated_at = datetime.now()
+        await manager.broadcast(
+            session_id,
+            {"type": "task", "data": json.loads(task.json())}
+        )
+        
+        # タスク完了の要約を生成
+        summary = await generate_task_summary(session.model_id, user_content, steps_results)
+        
+        # 完了メッセージをユーザーに通知
+        complete_message = Message(
+            id=str(uuid.uuid4()),
+            role="assistant",
+            content=f"タスク「{task_title}」が完了しました。\n\n{summary}",
+            timestamp=datetime.now(),
+            files=None
+        )
+        messages_db[session_id].append(complete_message)
+        await manager.broadcast(
+            session_id,
+            {"type": "message", "data": json.loads(complete_message.json())}
+        )
         
         # エージェントの状態を更新
         agent_state_db[session_id] = AgentState.idle
@@ -747,6 +1021,17 @@ async def simulate_agent_response(session_id: str, user_content: str):
             session_id,
             {"type": "message", "data": json.loads(error_message.json())}
         )
+        
+        # 実行中のタスクがあれば、状態を「失敗」に更新
+        current_tasks = tasks_db.get(session_id, [])
+        for task in current_tasks:
+            if task.status == TaskStatus.in_progress:
+                task.status = TaskStatus.failed
+                task.updated_at = datetime.now()
+                await manager.broadcast(
+                    session_id,
+                    {"type": "task", "data": json.loads(task.json())}
+                )
         
         # エージェントの状態を更新
         agent_state_db[session_id] = AgentState.idle
