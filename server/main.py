@@ -197,63 +197,116 @@ task_steps_db: Dict[str, List[TaskStep]] = {}
 agent_actions_db: Dict[str, List[AgentAction]] = {}
 agent_state_db: Dict[str, AgentState] = {}
 
-# API用のプロンプトテンプレート
+# API用のプロンプトテンプレート - より単純なシステムプロンプトに変更
 SYSTEM_PROMPT = """
-あなたはManusというAIエージェントです。ユーザーのタスク指示を解析し、実行する能力を持っています。
-以下のツールを使用できます：
-1. execute_shell_command - シェルコマンドを実行
-2. read_file - ファイルを読み取る
-3. write_file - ファイルに書き込む
-4. fetch_web_content - Webのコンテンツを取得
-
-まず、ユーザーの指示を分析し、必要なステップに分解してください。
-各ステップは具体的なアクションとして表現し、実行可能な形式にしてください。
+あなたはManusというAIエージェントです。ユーザーのタスク指示を解析し、実行可能なステップに分解してください。
+レスポンスはJSON形式で返してください。
 """
 
-# Ollamaからレスポンスを取得する関数
-async def get_ollama_response(model_id, prompt, system_prompt=SYSTEM_PROMPT, max_tokens=4000):
+# テスト用の単純なリクエスト関数を追加
+async def test_ollama_simple_request():
     """
-    Ollamaサーバーからレスポンスを取得する関数
+    Ollamaへの最小限のリクエストテスト
     """
-    print(f"Ollamaリクエスト開始 - モデル: {model_id}")
+    model_id = "llama3" # または使用可能な別のモデル
+    simple_prompt = "こんにちは"
+    simple_system = "あなたは有能なアシスタントです。"
     
-    # 設定からURLを取得、またはデフォルト値を使用
+    print("--- シンプルなOllamaリクエストテスト開始 ---")
+    
     base_url = OLLAMA_API_URL
     url = f"{base_url}/api/generate"
-    print(f"Ollamaリクエスト - URL: {url}")
     
-    # リクエストデータを準備
+    # 最小限のデータ
     data = {
         "model": model_id,
-        "prompt": prompt,
-        "system": system_prompt,
-        "stream": False,
-        "options": {
-            "num_predict": max_tokens
-        }
+        "prompt": simple_prompt,
+        "system": simple_system,
+        "stream": False
     }
-    print(f"Ollamaリクエスト - データ: {json.dumps(data)[:200]}...")
     
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, json=data)
             
             if response.status_code == 200:
                 result = response.json()
-                return result.get("response", "")
+                print(f"成功! レスポンス: {result.get('response', '')[:100]}...")
+                return True
+            else:
+                print(f"エラー: {response.status_code} - {response.text}")
+                return False
+    except Exception as e:
+        print(f"例外: {str(e)}")
+        return False
+
+# Ollamaからレスポンスを取得する関数 - 改善版
+async def get_ollama_response(model_id, prompt, system_prompt=SYSTEM_PROMPT, max_tokens=4000):
+    """
+    Ollamaサーバーからレスポンスを取得する関数 - 改善版
+    """
+    try:
+        # 設定からURLを取得
+        base_url = OLLAMA_API_URL
+        url = f"{base_url}/api/generate"
+        
+        # シンプル化したリクエストデータ
+        data = {
+            "model": model_id,
+            "prompt": prompt,
+            "system": system_prompt,
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens
+            }
+        }
+        
+        print(f"Ollamaリクエスト内容: {json.dumps(data, ensure_ascii=False)[:500]}...")
+        
+        # タイムアウト設定を長め（120秒）に設定
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # まずシンプルなテストリクエストを試す
+            test_success = await test_ollama_simple_request()
+            if not test_success:
+                print("警告: シンプルなテストリクエストが失敗しました。Ollamaサーバーに問題がある可能性があります。")
+            
+            # 実際のリクエストを送信
+            response = await client.post(url, json=data)
+            
+            if response.status_code == 200:
+                result = response.json()
+                response_text = result.get("response", "")
+                print(f"Ollamaレスポンス成功: 長さ{len(response_text)}文字")
+                return response_text
             else:
                 error_detail = f"HTTPエラー: {response.status_code} - {response.text}"
                 print(f"Ollamaリクエストエラー: {error_detail}")
                 return f"エラー: {error_detail}"
+    
+    except httpx.TimeoutException as e:
+        error_msg = f"タイムアウトエラー: {str(e)}"
+        print(error_msg)
+        return f"エラー: {error_msg}"
+    
+    except httpx.RequestError as e:
+        error_msg = f"リクエストエラー: {str(e)}"
+        print(error_msg)
+        return f"エラー: {error_msg}"
+    
+    except json.JSONDecodeError as e:
+        error_msg = f"JSONデコードエラー: {str(e)}"
+        print(error_msg)
+        return f"エラー: {error_msg}"
+    
     except Exception as e:
-        error_detail = f"{str(e)}\n{traceback.format_exc()}"
-        print(f"Ollamaリクエスト例外: {error_detail}")
-        return f"例外発生: {error_detail}"
+        error_msg = f"予期せぬエラー: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        return f"エラー: {error_msg}"
 
-# タスクを解析して実行ステップに分解する
+# タスクを解析して実行ステップに分解する - 改善版
 async def analyze_task(model_id, task_description):
     """
-    ユーザーのタスク指示を解析し、実行ステップに分解する
+    ユーザーのタスク指示を解析し、実行ステップに分解する - 改善版
     """
     print(f"タスク解析開始 - モデル: {model_id}, タスク: {task_description[:50]}...")
     prompt = f"""
@@ -261,7 +314,8 @@ async def analyze_task(model_id, task_description):
 
 {task_description}
 
-最大5つのステップに分けて、JSONフォーマットで返してください：
+最大5つのステップに分けて、以下のJSON形式で返してください。他の説明は不要です：
+
 {{
     "thought": "タスクの分析と考察...",
     "steps": [
@@ -283,29 +337,57 @@ async def analyze_task(model_id, task_description):
             content = response
             print(f"タスク解析レスポンス: {content[:100]}...")
             
-            # JSONブロックを抽出する
+            # JSONブロックを抽出する - 改善版
             import re
-            json_match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
+            
+            # 1. JSONブロック（```json 〜 ```）を探す
+            json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', content, re.DOTALL)
             if json_match:
                 print("JSONブロックを検出しました")
                 json_str = json_match.group(1)
             else:
-                print("JSONブロックが見つかりません、テキスト全体を解析します")
-                json_str = content
-            
-            # 余分な文字を削除してJSONを解析
-            json_str = re.sub(r'^[^{]*', '', json_str)
-            json_str = re.sub(r'[^}]*$', '', json_str)
+                # 2. 単純に最初の { から最後の } までを取得
+                first_brace = content.find('{')
+                last_brace = content.rfind('}')
+                
+                if first_brace >= 0 and last_brace > first_brace:
+                    print("JSONブロックは見つかりませんが、{}で囲まれた部分を抽出します")
+                    json_str = content[first_brace:last_brace+1]
+                else:
+                    print("JSON形式のデータが見つかりません、テキスト全体を解析します")
+                    json_str = content
             
             print(f"JSONパース前: {json_str[:100]}...")
-            plan = json.loads(json_str)
-            print("JSONパース成功")
-            return {
-                "success": True,
-                "plan": plan
-            }
+            
+            # 文字列をJSON形式に整形してからパース
+            try:
+                plan = json.loads(json_str)
+                print("JSONパース成功")
+                
+                # 必須フィールドの存在確認
+                if "thought" not in plan or "steps" not in plan:
+                    print("JSONの形式が不正: 'thought'または'steps'フィールドがありません")
+                    return {
+                        "success": False,
+                        "error": "JSONの形式が不正: 必須フィールドがありません",
+                        "raw_response": content
+                    }
+                
+                return {
+                    "success": True,
+                    "plan": plan
+                }
+            except json.JSONDecodeError as e:
+                # JSON解析エラー - 単純なエラーメッセージを返す
+                error_msg = f"JSONの解析に失敗しました: {str(e)}"
+                print(f"{error_msg}")
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "raw_response": content
+                }
         except Exception as e:
-            error_msg = f"JSONの解析に失敗しました: {str(e)}"
+            error_msg = f"タスク解析処理中にエラーが発生しました: {str(e)}"
             print(f"{error_msg} - レスポンス: {content[:200]}")
             return {
                 "success": False,
@@ -700,6 +782,11 @@ async def simulate_agent_response(session_id: str, user_content: str):
     )
 
     try:
+        # 簡単なテストリクエストでOllamaの接続を確認
+        test_success = await test_ollama_simple_request()
+        if not test_success:
+            print("警告: Ollamaテストリクエストが失敗しました。処理を継続しますが注意が必要です。")
+        
         # タスクを解析して実行ステップに分解
         print(f"タスク解析開始 - モデル: {session.model_id}, タスク: {user_content[:50]}...")
         result = await analyze_task(session.model_id, user_content)
